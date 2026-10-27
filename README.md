@@ -44,7 +44,8 @@ Every Monday the schedule starts the Lambda function. It reads `input/sales.csv`
 
 **Security choices**
 - The S3 bucket blocks all public access and is encrypted at rest.
-- The Lambda's IAM role follows least privilege: it can read `input/*` and write `reports/*`, and nothing else.
+- The Lambda's IAM role follows least privilege: it can read `input/*`, write `reports/*`, and read exactly one Parameter Store value, and nothing else.
+- The Groq API key is stored as an encrypted SecureString in AWS Systems Manager Parameter Store. It is created by hand, so it never appears in the code, in Git, or in Terraform's state file.
 - Terraform state files and variable files are excluded from Git.
 
 ## Features
@@ -100,8 +101,21 @@ No API key? The report still runs and uses the rule-based summary.
 
 Requires an AWS account, the AWS CLI configured with credentials, and Terraform 1.5 or newer.
 
+Optional, for the AI summary: store your Groq key in Parameter Store first. This prompt hides what you type and keeps the key out of your shell history:
+
+```bash
+read -s -p "Groq key: " KEY; echo
+aws ssm put-parameter --name "/weekly-sales-report/groq-api-key" --type SecureString --value "$KEY" --overwrite
+unset KEY
+```
+
+Without the key, the Lambda still works and uses the rule-based summary.
+
+Then build the Lambda package (our code plus the `groq` library, built for Lambda's Linux platform) and deploy:
+
 ```bash
 cd terraform
+bash build.sh       # must run before plan/apply
 terraform init
 terraform plan      # review what will be created
 terraform apply
@@ -116,10 +130,11 @@ aws s3 cp s3://$(terraform output -raw bucket_name)/reports/ /tmp/reports --recu
 cat /tmp/reports/*
 ```
 
-Remove everything when you are done:
+Remove everything when you are done (the Parameter Store key is not managed by Terraform, so delete it separately):
 
 ```bash
 terraform destroy
+aws ssm delete-parameter --name "/weekly-sales-report/groq-api-key"
 ```
 
 The workload is one tiny function run per week, so it is designed to cost very little. Check current AWS pricing and set a billing alert before you deploy.
@@ -129,7 +144,7 @@ The workload is one tiny function run per week, so it is designed to cost very l
 - [x] Version 1: report from a CSV
 - [x] Version 2: AI-written summary with automatic fallback
 - [x] Version 3: runs weekly on AWS (S3, Lambda, EventBridge), defined with Terraform
-- [ ] Version 3b: AI summary in the cloud, with the API key stored in AWS Systems Manager Parameter Store
+- [x] Version 3b: AI summary in the cloud, with the API key stored in AWS Systems Manager Parameter Store
 - [ ] Version 4: read from a real data source and email the report
 
 ## What I learned
