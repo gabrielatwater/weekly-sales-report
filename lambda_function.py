@@ -17,11 +17,31 @@ LOCAL_CSV = "/tmp/sales.csv"  # Lambda can only write files under /tmp
 
 # Created once and reused if Lambda keeps the container warm
 s3 = boto3.client("s3")
+ssm = boto3.client("ssm")
+
+
+def load_groq_key():
+    """Fetch the Groq API key from AWS Parameter Store, if one is configured.
+
+    The key is never in our code or in Terraform. It lives encrypted in
+    Parameter Store, and only this function's IAM role may read it. We put it
+    into the environment variable that ai_summary.py already looks for.
+    """
+    name = os.environ.get("GROQ_PARAMETER_NAME")
+    if not name or os.environ.get("GROQ_API_KEY"):
+        return  # nothing configured, or already loaded on an earlier run
+    try:
+        response = ssm.get_parameter(Name=name, WithDecryption=True)
+        os.environ["GROQ_API_KEY"] = response["Parameter"]["Value"]
+    except Exception as error:
+        # Not fatal: the report falls back to the rule-based summary
+        print(f"Could not load the Groq key from Parameter Store: {error}")
 
 
 def handler(event, context):
     """Lambda calls this function. 'event' and 'context' come from AWS."""
     bucket = os.environ["BUCKET_NAME"]
+    load_groq_key()
 
     s3.download_file(bucket, INPUT_KEY, LOCAL_CSV)
     orders = load_orders(LOCAL_CSV)

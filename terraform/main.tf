@@ -4,6 +4,10 @@ locals {
   # S3 bucket names must be unique across ALL of AWS, so we add your account ID
   bucket_name   = "${var.project_name}-${data.aws_caller_identity.current.account_id}"
   function_name = "${var.project_name}-lambda"
+
+  # Where the Groq key is stored. We create it by hand (see README), NOT with
+  # Terraform, so the secret never ends up in Terraform's state file.
+  groq_parameter_name = "/${var.project_name}/groq-api-key"
 }
 
 # ---------------------------------------------------------------- S3 bucket
@@ -39,27 +43,12 @@ resource "aws_s3_object" "sample_data" {
 }
 
 # ------------------------------------------------------------ Lambda package
-# Zip up the Python files the function needs
+# Zip up the folder made by build.sh: our Python files plus the groq library.
+# Run "bash build.sh" before terraform plan/apply, or this folder won't exist.
 data "archive_file" "lambda" {
   type        = "zip"
+  source_dir  = "${path.module}/build/package"
   output_path = "${path.module}/build/lambda.zip"
-
-  source {
-    content  = file("${path.module}/../lambda_function.py")
-    filename = "lambda_function.py"
-  }
-  source {
-    content  = file("${path.module}/../report.py")
-    filename = "report.py"
-  }
-  source {
-    content  = file("${path.module}/../summary.py")
-    filename = "summary.py"
-  }
-  source {
-    content  = file("${path.module}/../ai_summary.py")
-    filename = "ai_summary.py"
-  }
 }
 
 # --------------------------------------------------------------- IAM (permissions)
@@ -103,6 +92,22 @@ resource "aws_iam_role_policy" "bucket_access" {
   policy = data.aws_iam_policy_document.bucket_access.json
 }
 
+# Least privilege again: the function may read ONE parameter, nothing else in
+# Parameter Store. Note the ARN has "parameter" followed directly by the name,
+# which already starts with a slash.
+data "aws_iam_policy_document" "groq_key_access" {
+  statement {
+    actions   = ["ssm:GetParameter"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.groq_parameter_name}"]
+  }
+}
+
+resource "aws_iam_role_policy" "groq_key_access" {
+  name   = "groq-key-access"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.groq_key_access.json
+}
+
 # ------------------------------------------------------------------- Lambda
 resource "aws_cloudwatch_log_group" "lambda" {
   name              = "/aws/lambda/${local.function_name}"
@@ -114,14 +119,16 @@ resource "aws_lambda_function" "report" {
   role             = aws_iam_role.lambda.arn
   runtime          = "python3.12"
   handler          = "lambda_function.handler"
+  architectures    = ["x86_64"] # must match the platform build.sh packages for
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = 30
-  memory_size      = 128
+  timeout          = 60  # the AI call needs more time than the rule-based version
+  memory_size      = 256 # the groq library needs more memory than plain Python
 
   environment {
     variables = {
-      BUCKET_NAME = aws_s3_bucket.reports.id
+      BUCKET_NAME         = aws_s3_bucket.reports.id
+      GROQ_PARAMETER_NAME = local.groq_parameter_name
     }
   }
 
