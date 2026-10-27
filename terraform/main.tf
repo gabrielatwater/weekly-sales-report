@@ -108,6 +108,30 @@ resource "aws_iam_role_policy" "groq_key_access" {
   policy = data.aws_iam_policy_document.groq_key_access.json
 }
 
+# ------------------------------------------------------------------ Email (SES)
+# Amazon SES only sends from addresses you have proven you own. Creating these
+# makes AWS email each address a verification link that you must click once.
+# toset() removes duplicates, so using the same address for both is fine.
+resource "aws_ses_email_identity" "verified" {
+  for_each = toset([var.sender_email, var.recipient_email])
+  email    = each.value
+}
+
+# The function may send email only involving our two verified addresses. (In
+# SES "sandbox" mode, AWS also checks permission on the recipient's address.)
+data "aws_iam_policy_document" "send_email" {
+  statement {
+    actions   = ["ses:SendEmail"]
+    resources = [for identity in aws_ses_email_identity.verified : identity.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "send_email" {
+  name   = "send-email"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.send_email.json
+}
+
 # ------------------------------------------------------------------- Lambda
 resource "aws_cloudwatch_log_group" "lambda" {
   name              = "/aws/lambda/${local.function_name}"
@@ -129,6 +153,8 @@ resource "aws_lambda_function" "report" {
     variables = {
       BUCKET_NAME         = aws_s3_bucket.reports.id
       GROQ_PARAMETER_NAME = local.groq_parameter_name
+      SENDER_EMAIL        = var.sender_email
+      RECIPIENT_EMAIL     = var.recipient_email
     }
   }
 
@@ -157,4 +183,34 @@ resource "aws_lambda_permission" "allow_schedule" {
   function_name = aws_lambda_function.report.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.weekly.arn
+}
+
+# ------------------------------------------------- Run when a new CSV is uploaded
+# Gives S3 permission to start the function, but only for events from OUR bucket
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id   = "AllowS3Invoke"
+  action         = "lambda:InvokeFunction"
+  function_name  = aws_lambda_function.report.function_name
+  principal      = "s3.amazonaws.com"
+  source_arn     = aws_s3_bucket.reports.arn
+  source_account = data.aws_caller_identity.current.account_id
+}
+
+# Start the function when a .csv file lands in input/. Reports are written to
+# reports/, a different folder, so the function can never trigger itself.
+resource "aws_s3_bucket_notification" "new_data" {
+  bucket = aws_s3_bucket.reports.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.report.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "input/"
+    filter_suffix       = ".csv"
+  }
+
+  # Create this after the sample data upload, so deploying doesn't send an email
+  depends_on = [
+    aws_lambda_permission.allow_s3,
+    aws_s3_object.sample_data,
+  ]
 }

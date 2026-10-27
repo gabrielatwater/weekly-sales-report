@@ -10,6 +10,16 @@ variable "project_name" {
   default     = "weekly-sales-report"
 }
 
+variable "sender_email" {
+  description = "Address the report is sent FROM (it must be verified in Amazon SES)"
+  type        = string
+}
+
+variable "recipient_email" {
+  description = "Address the report is sent TO (it must be verified while SES is in sandbox mode)"
+  type        = string
+}
+
 variable "schedule" {
   description = "When the report runs, as an EventBridge cron expression (UTC)"
   type        = string
