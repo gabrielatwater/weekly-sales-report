@@ -1,6 +1,6 @@
 # Weekly Sales Report Automation
 
-A Python tool that turns a raw sales CSV into a clear weekly report: revenue, orders, average order value, top products, and a plain-English summary of how this week compared to last week. It runs locally, and it is also deployed to AWS with Terraform, where it builds the report automatically every Monday.
+A Python tool that turns a raw sales CSV into a clear weekly report: revenue, orders, average order value, top products, and a plain-English summary of how this week compared to last week. It runs locally, and it is also deployed to AWS with Terraform, where it builds the report and emails it automatically every Monday and whenever a new sales file is uploaded.
 
 Small businesses often spend hours every week copying numbers into reports. This automates that.
 
@@ -35,16 +35,20 @@ revenue). Last week's top seller was Gift Card.
 ```mermaid
 flowchart LR
     A["EventBridge<br/>weekly schedule"] --> B["Lambda<br/>Python report code"]
-    C[("S3 bucket<br/>input/sales.csv")] --> B
+    C[("S3 bucket<br/>input/*.csv")] -- "new file uploaded" --> B
+    B -- "reads data" --> C
     B --> D[("S3 bucket<br/>reports/")]
-    B --> E["CloudWatch Logs"]
+    B --> E["Amazon SES<br/>email"]
+    B --> F["CloudWatch Logs"]
+    G["Parameter Store<br/>Groq API key"] --> B
 ```
 
-Every Monday the schedule starts the Lambda function. It reads `input/sales.csv` from S3, builds the report, and saves it to `reports/` in the same bucket. All of the infrastructure is defined as code in the `terraform/` folder.
+The Lambda function starts in two ways: every Monday on a schedule, and whenever a new `.csv` file is uploaded to the `input/` folder. It reads the sales data from S3, builds the report, saves it to `reports/` (a different folder, so it can never trigger itself), and emails it with Amazon SES. All of the infrastructure is defined as code in the `terraform/` folder.
 
 **Security choices**
 - The S3 bucket blocks all public access and is encrypted at rest.
-- The Lambda's IAM role follows least privilege: it can read `input/*`, write `reports/*`, and read exactly one Parameter Store value, and nothing else.
+- The Lambda's IAM role follows least privilege: it can read `input/*`, write `reports/*`, read exactly one Parameter Store value, and send email only for the two verified addresses, and nothing else.
+- Email addresses are Terraform variables kept in a `terraform.tfvars` file that is excluded from Git.
 - The Groq API key is stored as an encrypted SecureString in AWS Systems Manager Parameter Store. It is created by hand, so it never appears in the code, in Git, or in Terraform's state file.
 - Terraform state files and variable files are excluded from Git.
 
@@ -57,6 +61,8 @@ Every Monday the schedule starts the Lambda function. It reads `input/sales.csv`
 - Automatic fallback to a rule-based summary if the API key, package, or network is unavailable
 - Handles edge cases such as no data for the previous week (no divide-by-zero crashes) and an empty file
 - Deployed on AWS (S3, Lambda, EventBridge) with Terraform
+- Runs on a weekly schedule and also automatically when a new CSV is uploaded
+- Emails the finished report through Amazon SES; if the email fails, the report is still saved
 
 ## Project structure
 
@@ -68,7 +74,8 @@ Every Monday the schedule starts the Lambda function. It reads `input/sales.csv`
 | `ai_summary.py` | AI summary via Groq, with fallback to `summary.py` |
 | `report_v2.py` | Runs everything locally and saves `weekly_report_v2.txt` |
 | `lambda_function.py` | AWS Lambda entry point: S3 in, report out |
-| `terraform/` | Infrastructure as code: S3 bucket, IAM role, Lambda, schedule, logs |
+| `terraform/` | Infrastructure as code: S3 bucket, IAM, Lambda, schedule, upload trigger, SES, logs |
+| `terraform/build.sh` | Packages the code and the `groq` library for Lambda's Linux platform |
 
 The summarizer is a swappable function. Changing one line in `report_v2.py` switches between AI and rule-based summaries.
 
@@ -111,6 +118,15 @@ unset KEY
 
 Without the key, the Lambda still works and uses the rule-based summary.
 
+Choose where the report is emailed. Create `terraform/terraform.tfvars` (it is ignored by Git). The same address can be used for both:
+
+```hcl
+sender_email    = "you@example.com"
+recipient_email = "you@example.com"
+```
+
+After `terraform apply`, AWS sends a verification link to each address. Click it, because SES will not send from or to unverified addresses. New AWS accounts start in the SES sandbox, which only allows verified recipients.
+
 Then build the Lambda package (our code plus the `groq` library, built for Lambda's Linux platform) and deploy:
 
 ```bash
@@ -145,7 +161,9 @@ The workload is one tiny function run per week, so it is designed to cost very l
 - [x] Version 2: AI-written summary with automatic fallback
 - [x] Version 3: runs weekly on AWS (S3, Lambda, EventBridge), defined with Terraform
 - [x] Version 3b: AI summary in the cloud, with the API key stored in AWS Systems Manager Parameter Store
-- [ ] Version 4: read from a real data source and email the report
+- [x] Version 4: email the report with Amazon SES, and run automatically when a new CSV is uploaded
+- [ ] Version 5: read from a live data source such as a Google Sheet
+- [ ] Request SES production access so reports can go to unverified addresses
 
 ## What I learned
 
